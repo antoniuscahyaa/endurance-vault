@@ -84,6 +84,11 @@ jobs:
             -storepass android \
             -alias androiddebugkey > /dev/null
 
+          echo "ANDROID_KEYSTORE_PATH=${HOME}/.android/debug.keystore" >> "${GITHUB_ENV}"
+          echo "ANDROID_KEYSTORE_PASSWORD=android" >> "${GITHUB_ENV}"
+          echo "ANDROID_KEY_ALIAS=androiddebugkey" >> "${GITHUB_ENV}"
+          echo "ANDROID_KEY_PASSWORD=android" >> "${GITHUB_ENV}"
+
           echo "Persistent keystore berhasil dipasang dan diverifikasi."
           keytool -list -v \
             -keystore "${HOME}/.android/debug.keystore" \
@@ -95,14 +100,14 @@ jobs:
         run: gradle -p "${PROJECT_DIR}" testDebugUnitTest --stacktrace
 
       - name: Build debug APK
-        run: gradle -p "${PROJECT_DIR}" assembleDebug --stacktrace
+        run: gradle -p "${PROJECT_DIR}" assembleRelease --stacktrace
 
       - name: Verify APK signature
         shell: bash
         run: |
           set -euo pipefail
 
-          APK="$(find "${PROJECT_DIR}/app/build/outputs/apk/debug" -maxdepth 1 -type f -name '*.apk' -print -quit)"
+          APK="$(find "${PROJECT_DIR}/app/build/outputs/apk/release" -maxdepth 1 -type f -name '*.apk' -print -quit)"
           if [[ -z "${APK}" ]]; then
             echo "::error::APK debug tidak ditemukan setelah build."
             exit 1
@@ -139,7 +144,7 @@ jobs:
       - name: Upload EnduranceVault APK
         uses: actions/upload-artifact@v4
         with:
-          name: EnduranceVault-native-debug-apk
+          name: EnduranceVault-native-release-apk
           path: ${{ env.APK_PATH }}
           if-no-files-found: error
           retention-days: 30
