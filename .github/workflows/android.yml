@@ -63,8 +63,21 @@ jobs:
         shell: bash
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           set -euo pipefail
+
+          # Nilai dibaca dari GitHub Secrets; jika kosong, pakai default lama
+          # agar build tetap jalan selama masa transisi.
+          STORE_PASS="${KEYSTORE_PASSWORD:-android}"
+          ALIAS="${KEY_ALIAS:-androiddebugkey}"
+          KEY_PASS="${KEY_PASSWORD:-${STORE_PASS}}"
+
+          if [[ -z "${KEYSTORE_PASSWORD}" || -z "${KEY_ALIAS}" || -z "${KEY_PASSWORD}" ]]; then
+            echo "::warning::Secret KEYSTORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD belum lengkap; memakai nilai default."
+          fi
 
           if [[ -z "${KEYSTORE_BASE64}" ]]; then
             echo "::error::GitHub Secret KEYSTORE_BASE64 belum diatur pada repository native."
@@ -81,25 +94,33 @@ jobs:
 
           keytool -list \
             -keystore "${HOME}/.android/debug.keystore" \
-            -storepass android \
-            -alias androiddebugkey > /dev/null
+            -storepass "${STORE_PASS}" \
+            -alias "${ALIAS}" > /dev/null
 
           echo "ANDROID_KEYSTORE_PATH=${HOME}/.android/debug.keystore" >> "${GITHUB_ENV}"
-          echo "ANDROID_KEYSTORE_PASSWORD=android" >> "${GITHUB_ENV}"
-          echo "ANDROID_KEY_ALIAS=androiddebugkey" >> "${GITHUB_ENV}"
-          echo "ANDROID_KEY_PASSWORD=android" >> "${GITHUB_ENV}"
+          echo "ANDROID_KEYSTORE_PASSWORD=${STORE_PASS}" >> "${GITHUB_ENV}"
+          echo "ANDROID_KEY_ALIAS=${ALIAS}" >> "${GITHUB_ENV}"
+          echo "ANDROID_KEY_PASSWORD=${KEY_PASS}" >> "${GITHUB_ENV}"
 
           echo "Persistent keystore berhasil dipasang dan diverifikasi."
           keytool -list -v \
             -keystore "${HOME}/.android/debug.keystore" \
-            -storepass android \
-            -alias androiddebugkey | grep -E 'SHA1:|SHA256:'
+            -storepass "${STORE_PASS}" \
+            -alias "${ALIAS}" | grep -E 'SHA1:|SHA256:'
 
-      - name: Run unit tests
-        continue-on-error: true
+      - name: Verify release configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'applicationId = "com.endurancevault.app"' "${PROJECT_DIR}/app/build.gradle.kts"
+          grep -q 'signingConfig = signingConfigs.getByName("release")' "${PROJECT_DIR}/app/build.gradle.kts"
+          test -s "${HOME}/.android/debug.keystore"
+          echo "Package name, release signing config, and persistent keystore are present."
+
+      - name: Run unit tests (required)
         run: gradle -p "${PROJECT_DIR}" testDebugUnitTest --stacktrace
 
-      - name: Build debug APK
+      - name: Build signed release APK
         run: gradle -p "${PROJECT_DIR}" assembleRelease --stacktrace
 
       - name: Verify APK signature
@@ -109,12 +130,17 @@ jobs:
 
           APK="$(find "${PROJECT_DIR}/app/build/outputs/apk/release" -maxdepth 1 -type f -name '*.apk' -print -quit)"
           if [[ -z "${APK}" ]]; then
-            echo "::error::APK debug tidak ditemukan setelah build."
+            echo "::error::APK release tidak ditemukan setelah build."
             exit 1
           fi
 
-          BUILD_TOOLS="${ANDROID_HOME:-${ANDROID_SDK_ROOT}}/build-tools"
-          APKSIGNER="$(find "${BUILD_TOOLS}" -type f -name apksigner | sort -V | tail -n 1)"
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          if [[ -z "${SDK_ROOT}" ]]; then
+            echo "::error::ANDROID_HOME/ANDROID_SDK_ROOT tidak tersedia."
+            exit 1
+          fi
+          BUILD_TOOLS="${SDK_ROOT}/build-tools"
+          APKSIGNER="$(find "${BUILD_TOOLS}" -type f -name apksigner 2>/dev/null | sort -V | tail -n 1)"
           if [[ -z "${APKSIGNER}" ]]; then
             echo "::error::apksigner tidak ditemukan."
             exit 1
@@ -125,8 +151,8 @@ jobs:
           APK_SHA="$("${APKSIGNER}" verify --print-certs "${APK}" | awk '/certificate SHA-256 digest/ {print tolower($NF); exit}' | tr -d ':')"
           KEY_SHA="$(keytool -list -v \
             -keystore "${HOME}/.android/debug.keystore" \
-            -storepass android \
-            -alias androiddebugkey | awk '/SHA256:/ {print tolower($2); exit}' | tr -d ':')"
+            -storepass "${ANDROID_KEYSTORE_PASSWORD}" \
+            -alias "${ANDROID_KEY_ALIAS}" | awk '/SHA256:/ {print tolower($2); exit}' | tr -d ':')"
 
           echo "APK certificate SHA-256     : ${APK_SHA}"
           echo "Keystore certificate SHA-256: ${KEY_SHA}"
@@ -138,14 +164,18 @@ jobs:
 
           echo "### APK signing verification" >> "${GITHUB_STEP_SUMMARY}"
           echo "SHA-256: ${APK_SHA}" >> "${GITHUB_STEP_SUMMARY}"
-          echo "APK: ${APK}" >> "${GITHUB_STEP_SUMMARY}"
+          echo "APK release: ${APK}" >> "${GITHUB_STEP_SUMMARY}"
           echo "APK_PATH=${APK}" >> "${GITHUB_ENV}"
+          sha256sum "${APK}" | tee "${APK}.sha256"
+          echo "CHECKSUM_PATH=${APK}.sha256" >> "${GITHUB_ENV}"
 
-      - name: Upload EnduranceVault APK
+      - name: Upload EnduranceVault APK and checksum
         uses: actions/upload-artifact@v4
         with:
           name: EnduranceVault-native-release-apk
-          path: ${{ env.APK_PATH }}
+          path: |
+            ${{ env.APK_PATH }}
+            ${{ env.CHECKSUM_PATH }}
           if-no-files-found: error
           retention-days: 30
 
