@@ -129,8 +129,26 @@ jobs:
         shell: bash
         run: |
           if [[ "${{ steps.unit-tests.outcome }}" == "failure" ]]; then
-            echo "::warning::Unit test ada yang gagal. APK tetap dibuat; lihat artifact EnduranceVault-unit-test-report."
+            echo "::warning::Unit test ada yang gagal. APK tetap dibuat; rincian ada di Summary run ini."
             echo "### Unit test: GAGAL (APK tetap dibuat)" >> "${GITHUB_STEP_SUMMARY}"
+            # Daftar tes yang gagal ditulis ke Summary (pengganti artifact laporan tes).
+            RES="${PROJECT_DIR}/app/build/test-results/testDebugUnitTest"
+            if compgen -G "${RES}/*.xml" > /dev/null; then
+              python3 - "${RES}" >> "${GITHUB_STEP_SUMMARY}" <<'PY'
+          import sys, glob
+          import xml.etree.ElementTree as ET
+          fails = []
+          for f in glob.glob(sys.argv[1] + "/*.xml"):
+              for tc in ET.parse(f).getroot().iter("testcase"):
+                  fl = tc.find("failure")
+                  if fl is None:
+                      fl = tc.find("error")
+                  if fl is not None:
+                      msg = (fl.get("message") or "").strip().splitlines()
+                      fails.append("- `%s.%s`: %s" % (tc.get("classname"), tc.get("name"), msg[0][:200] if msg else ""))
+          print("\n".join(fails[:30]) or "(rincian tidak tersedia)")
+          PY
+            fi
           else
             echo "### Unit test: lulus" >> "${GITHUB_STEP_SUMMARY}"
           fi
@@ -181,24 +199,14 @@ jobs:
           echo "SHA-256: ${APK_SHA}" >> "${GITHUB_STEP_SUMMARY}"
           echo "APK release: ${APK}" >> "${GITHUB_STEP_SUMMARY}"
           echo "APK_PATH=${APK}" >> "${GITHUB_ENV}"
-          sha256sum "${APK}" | tee "${APK}.sha256"
-          echo "CHECKSUM_PATH=${APK}.sha256" >> "${GITHUB_ENV}"
+          FILE_SHA="$(sha256sum "${APK}" | awk '{print $1}')"
+          echo "APK file SHA-256: ${FILE_SHA}"
+          echo "File SHA-256: ${FILE_SHA}" >> "${GITHUB_STEP_SUMMARY}"
 
-      - name: Upload EnduranceVault APK and checksum
+      - name: Upload EnduranceVault APK
         uses: actions/upload-artifact@v4
         with:
           name: EnduranceVault-native-release-apk
-          path: |
-            ${{ env.APK_PATH }}
-            ${{ env.CHECKSUM_PATH }}
+          path: ${{ env.APK_PATH }}
           if-no-files-found: error
           retention-days: 30
-
-      - name: Upload unit test report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: EnduranceVault-unit-test-report
-          path: ${{ env.PROJECT_DIR }}/app/build/reports/tests/testDebugUnitTest/
-          if-no-files-found: ignore
-          retention-days: 14
